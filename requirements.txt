@@ -1,0 +1,6 @@
+gitpython
+jira
+termcolor
+lxml
+bs4
+python-gitlab
