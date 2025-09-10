@@ -85,7 +85,8 @@ def download_code_from_pr_url(pr_url):
                 print(colored("[Error]","red"),colored(f"Failed Decoding: {file_name} (Saved file without decoding)","light_red"))
 
             folder = os.path.dirname(file_name)
-            os.makedirs(folder, exist_ok=True)
+            if folder:                                    #folder will be empty if file is in root folder
+                os.makedirs(folder, exist_ok=True)
             with open(file_name, "w") as fp:
                 fp.write(file_content)
 
