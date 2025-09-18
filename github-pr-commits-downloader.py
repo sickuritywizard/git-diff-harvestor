@@ -7,6 +7,7 @@ from urllib.parse import urlparse, quote
 from termcolor import colored
 import argparse,re
 import base64
+import shutil
 
 
 def get_args():
@@ -34,13 +35,24 @@ def get_github_api_baseurl(github_url):
     return github_api_base_url
 
 
-#Example PR URL: https://github.host.com/ORGNAME/REPONAME/pulls/pullnumber
-def download_code_from_pr_url(pr_url):
-    global GITHUB_API_TOKEN
+def create_results_dir(results_dir):
+    if os.path.exists(results_dir):
+        print(colored("[-] Directory already exists: ","red"),colored(f"{results_dir}","light_red"))
+        delete_dir = input(colored("[-] Delete existing directory(N/y): ","light_grey"))
+        if delete_dir.upper() == "Y":
+            shutil.rmtree(results_dir)
+        else:
+            print(colored("\nExiting... ","magenta"))
+            exit()
 
+    os.mkdir(results_dir)
+
+
+#Example PR URL: https://github.host.com/OWNERNAME/REPONAME/pulls/pullnumber
+def download_code_from_pr_url(pr_url):
     #Create Results Folder
     pr_url_dir = pr_url.split("/")
-    results_dir = f"{pr_url_dir[4]}_{pr_url_dir[5]}_{pr_url_dir[-1]}"     #org_repo_pullnumber
+    results_dir = f"{pr_url_dir[4]}_{pr_url_dir[5]}_{pr_url_dir[-1]}"     #owner_repo_pullnumber
 
     parent_dir = os.getcwd()
     try:
@@ -54,7 +66,7 @@ def download_code_from_pr_url(pr_url):
     #Get Base URL
     base_url = get_github_api_baseurl(pr_url)
     pr_uri_list = pr_url.split("/")[3:]
-    org,repo,pulls,pull_number = pr_uri_list[0],pr_uri_list[1],"pulls",pr_uri_list[3]  #URL has pull, but api requires pulls
+    owner,repo,pulls,pull_number = pr_uri_list[0],pr_uri_list[1],"pulls",pr_uri_list[3]  #URL has pull, but api requires pulls
 
     #Git Default Returns 30 results, so loop to get all pages
     page=0
@@ -62,7 +74,7 @@ def download_code_from_pr_url(pr_url):
     count = 0
     while True:
         page +=1
-        fetch_pr_api = f"{base_url}/repos/{org}/{repo}/{pulls}/{pull_number}/files?page={page}"
+        fetch_pr_api = f"{base_url}/repos/{owner}/{repo}/{pulls}/{pull_number}/files?page={page}"
         headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github.v3.diff"}
         response = requests.get(fetch_pr_api, headers=headers).json()
         res_content_len = len(response)
@@ -74,7 +86,7 @@ def download_code_from_pr_url(pr_url):
             file_name = item.get("filename")
             changed_file_sha = item.get("sha")
 
-            fetch_file_api = f"{base_url}/repos/{org}/{repo}/git/blobs/{changed_file_sha}"
+            fetch_file_api = f"{base_url}/repos/{owner}/{repo}/git/blobs/{changed_file_sha}"
             response = requests.get(fetch_file_api, headers=headers).json()
             file_content_base64 = response.get("content").replace("\n", "")
             try:
@@ -103,16 +115,78 @@ def download_diff_from_pr_url(pr_url):
     #Get Base URL
     base_url = get_github_api_baseurl(pr_url)
     pr_uri_list = pr_url.split("/")[3:]
-    org,repo,pulls,pull_number = pr_uri_list[0],pr_uri_list[1],"pulls",pr_uri_list[3]  #URL has pull, but api requires pulls
-    final_api_url = f"{base_url}/repos/{org}/{repo}/{pulls}/{pull_number}"
+    owner,repo,pulls,pull_number = pr_uri_list[0],pr_uri_list[1],"pulls",pr_uri_list[3]  #URL has pull, but api requires pulls
+    final_api_url = f"{base_url}/repos/{owner}/{repo}/{pulls}/{pull_number}"
     headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github.v3.diff"}
     response = requests.get(final_api_url, headers=headers)
     print(response.text)
 
 
-
+#Downloads complete files from commit url
 def download_code_from_commit_url(commit_url):
-    pass
+
+    #Create Results Folder
+    results_dir = f"commit_{commit_url.split("/")[-1]}"
+    parent_dir = os.getcwd()
+    create_results_dir(results_dir)
+    os.chdir(results_dir)
+
+    base_url = get_github_api_baseurl(commit_url)
+    headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github+json"}
+
+    commit_url_list = commit_url.split("/")[3:]
+    owner,repo,commit_sha = commit_url_list[0],commit_url_list[1],commit_url_list[3]
+
+
+    count=0
+    page=0
+    while True:
+        page +=1
+        get_commit_api = f"{base_url}/repos/{owner}/{repo}/commits/{commit_sha}?page={page}"
+        headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github+json"}
+        response = requests.get(get_commit_api, headers=headers).json()
+
+        all_files = response.get("files",[])
+        if len(all_files) == 0:
+            break
+
+        for item in response.get("files"):
+            count+=1
+            file_name = item.get("filename")
+            changed_file_sha = item.get("sha")
+
+            fetch_file_api = f"{base_url}/repos/{owner}/{repo}/git/blobs/{changed_file_sha}"
+            response = requests.get(fetch_file_api, headers=headers).json()
+            file_content_base64 = response.get("content").replace("\n", "")
+            try:
+                file_content = base64.b64decode(file_content_base64).decode()
+                print(colored("[File] ","light_grey"),colored(f"{file_name}","light_blue"))
+            except UnicodeDecodeError as e:
+                file_content = base64.b64decode(file_content_base64).decode('utf-8', errors='replace')
+                print(colored("[Error]","red"),colored(f"Failed Decoding: {file_name} (Saved file without decoding)","light_red"))
+
+            folder = os.path.dirname(file_name)
+            if folder:                                    #folder will be empty if file is in root folder
+                os.makedirs(folder, exist_ok=True)
+            with open(file_name, "w") as fp:
+                fp.write(file_content)
+
+
+    print(colored("\n[Completed] ","yellow"),colored(f"Total Files Downloaded: {count}","light_cyan"))
+    os.chdir(parent_dir)
+
+
+
+
+#Downloads Only Diff
+def download_diff_from_commit_url(commit_url):
+    base_url = get_github_api_baseurl(commit_url)
+    commit_url_list = commit_url.split("/")[3:]
+    owner,repo,commit_sha = commit_url_list[0],commit_url_list[1],commit_url_list[3]  #URL has pull, but api requires pulls
+    get_commit_details = f"{base_url}/repos/{owner}/{repo}/commits/{commit_sha}"
+    headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github.v3.diff"}
+    response = requests.get(get_commit_details, headers=headers)
+    print(response.text)
 
 
 
@@ -172,10 +246,10 @@ def main():
     if args.pullrequest_url:
         verify_github_token(args.pullrequest_url)
         download_code_from_pr_url(args.pullrequest_url)
-        #Example_PullRequest_URL = "https://github.host.com/ORGNAME/REPONAME/pulls/pullnumber"
+        #Example_PullRequest_URL = "https://github.host.com/OWNERNAME/REPONAME/pulls/pullnumber"
 
     if args.commit_url:
-        verify_github_token(args.commit_url)
+        # verify_github_token(args.commit_url)
         download_code_from_commit_url(args.commit_url)
         #Example_Commit_URL = "https://github.host.com/projectname/subproject/-/commit/commithash"
 
