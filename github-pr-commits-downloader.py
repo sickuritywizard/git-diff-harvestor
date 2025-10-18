@@ -8,6 +8,13 @@ from termcolor import colored
 import argparse,re
 import base64
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+)
 
 
 def get_args():
@@ -17,7 +24,8 @@ def get_args():
     parser.add_argument('-cu','--commit-url',dest='commit_url', help="Commit Request URL")
     parser.add_argument('-cf','--commit-file',dest='commit_file', help="Commit Request File")
     parser.add_argument('-t','--token',dest='github_token',help="Github Token (Optional: Fetched from Env: GITHUB_API_TOKEN)")
-    parser.add_argument('-ff','--full-file',action="store_true",dest='full_file',help="Download Complete File (Default: Downloads only diff)",default=False)
+    parser.add_argument('-do','--diff-only',action="store_true",dest='diff_only',help="Download diff only (Default: Downloads complete file)", default=False)
+    parser.add_argument('-mt','--threads',dest='multithread',help="Download using multiple threads (Default: Single Thread)", default=False, type=int)
     args = parser.parse_args()
 
     if not args.github_token and not os.getenv("GITHUB_API_TOKEN"):
@@ -54,14 +62,11 @@ def download_code_from_pr_url(pr_url):
     pr_url_dir = pr_url.split("/")
     results_dir = f"{pr_url_dir[4]}_{pr_url_dir[5]}_{pr_url_dir[-1]}"     #owner_repo_pullnumber
 
-    parent_dir = os.getcwd()
     try:
         os.mkdir(results_dir)
     except Exception as e:
-        print(colored("[X] Directory Already Exists: ","red"),colored(f"{results_dir}","light_red"))
+        logging.info(colored("[X] Directory Already Exists: ","red"),colored(f"{results_dir}","light_red"))
         exit(1)
-
-    os.chdir(results_dir)
 
     #Get Base URL
     base_url = get_github_api_baseurl(pr_url)
@@ -91,25 +96,27 @@ def download_code_from_pr_url(pr_url):
             file_content_base64 = response.get("content").replace("\n", "")
             try:
                 file_content = base64.b64decode(file_content_base64).decode()
-                print(colored("[File] ","light_grey"),colored(f"{file_name}","light_blue"))
+                logging.info(colored("[File] ","light_grey") + colored(f"{file_name}","light_blue"))
             except UnicodeDecodeError as e:
                 file_content = base64.b64decode(file_content_base64).decode('utf-8', errors='replace')
-                print(colored("[Error]","red"),colored(f"Failed Decoding: {file_name} (Saved file without decoding)","light_red"))
+                logging.info(colored("[Error]","red") + colored(f"Failed Decoding: {file_name} (Saved file without decoding)","light_red"))
 
             folder = os.path.dirname(file_name)
             if folder:                                    #folder will be empty if file is in root folder
-                os.makedirs(folder, exist_ok=True)
-            with open(file_name, "w") as fp:
+                os.makedirs(os.path.join(results_dir,folder), exist_ok=True)
+            with open(os.path.join(results_dir,file_name), "w") as fp:
                 fp.write(file_content)
 
 
-    print(colored("\n[Completed] ","yellow"),colored(f"Total Files Downloaded: {count}","light_cyan"))
-
-    os.chdir(parent_dir)
+    # print(colored(f"\n[{pr_url}] ","yellow"),colored(f" -> Files Downloaded: {count}","light_cyan"))
+    return {
+        "pr_url": pr_url,
+        "file_count": count,
+    }
 
 
 #Fetches all diff as a single response
-def download_diff_from_pr_url(pr_url):
+def download_only_diff_from_pr_url(pr_url):
     global GITHUB_API_TOKEN
 
     #Get Base URL
@@ -119,7 +126,12 @@ def download_diff_from_pr_url(pr_url):
     final_api_url = f"{base_url}/repos/{owner}/{repo}/{pulls}/{pull_number}"
     headers = {"Authorization": f"token {GITHUB_API_TOKEN}", "Accept": "application/vnd.github.v3.diff"}
     response = requests.get(final_api_url, headers=headers)
-    print(response.text)
+
+    pr_url_dir = pr_url.split("/")
+    results_file = f"{pr_url_dir[4]}_{pr_url_dir[5]}_{pr_url_dir[-1]}.txt"     #owner_repo_pullnumber
+    with open(results_file, "w") as fp:
+        fp.write(response.text)
+    print(colored(f"|{pr_url}| -> ","yellow"),colored(f"{results_file}","white"))
 
 
 #Downloads complete files from commit url
@@ -179,7 +191,7 @@ def download_code_from_commit_url(commit_url):
 
 
 #Downloads Only Diff
-def download_diff_from_commit_url(commit_url):
+def download_only_diff_from_commit_url(commit_url):
     base_url = get_github_api_baseurl(commit_url)
     commit_url_list = commit_url.split("/")[3:]
     owner,repo,commit_sha = commit_url_list[0],commit_url_list[1],commit_url_list[3]  #URL has pull, but api requires pulls
@@ -241,16 +253,22 @@ def main():
     os.makedirs("results", exist_ok=True)
     os.chdir("results")
 
-    DOWNLOAD_COMPLETE_FILE = args.full_file
+    download_diff_only = args.diff_only
 
     if args.pullrequest_url:
         verify_github_token(args.pullrequest_url)
-        download_code_from_pr_url(args.pullrequest_url)
+        if download_diff_only:
+            download_only_diff_from_pr_url(args.pullrequest_url)
+        else:
+            download_code_from_pr_url(args.pullrequest_url)
         #Example_PullRequest_URL = "https://github.host.com/OWNERNAME/REPONAME/pulls/pullnumber"
 
     if args.commit_url:
-        # verify_github_token(args.commit_url)
-        download_code_from_commit_url(args.commit_url)
+        verify_github_token(args.commit_url)
+        if download_diff_only:
+            download_only_diff_from_commit_url(args.commit_url)
+        else:
+            download_code_from_commit_url(args.commit_url)
         #Example_Commit_URL = "https://github.host.com/projectname/subproject/-/commit/commithash"
 
 
@@ -261,15 +279,64 @@ def main():
             for commit_url in urls:
                 commit_url = commit_url.strip()
                 print(colored(f"\n[-] {commit_url}","cyan"))
-                download_code_from_commit_url(commit_url)
+                if download_diff_only:
+                    download_only_diff_from_commit_url(commit_url)
+                else:
+                    download_code_from_commit_url(commit_url)
+
 
     elif args.pr_file:
         with open(os.path.join(curr_dir, args.pr_file), "r") as fileptr:
             urls = fileptr.readlines()
             verify_github_token(urls[0].strip())
-            for merge_url in urls:
-                merge_url = merge_url.strip()
-                print(colored(f"\n[-] {merge_url}","cyan"))
-                download_code_from_pr_url(merge_url)
+
+            if args.multithread:                
+                logging.info(colored(f"|| Downloading PullRequests [Threads={args.multithread}]","yellow"))
+
+                final_results = []
+                with ThreadPoolExecutor(max_workers=args.multithread) as executor:
+                    futures = {}
+                    for merge_url in urls:
+                        merge_url = merge_url.strip()
+                        logging.info(colored(f"[-] {merge_url}","cyan"))
+
+                        if download_diff_only:
+                            future = executor.submit(download_only_diff_from_pr_url, merge_url) 
+                        else:
+                            future = executor.submit(download_code_from_pr_url, merge_url) 
+
+                        futures[future] = merge_url
+
+                    #Wait for tasks to complete
+                    for future in as_completed(futures):
+                        merge_url = futures[future]
+                        try:
+                            result = future.result()          #Block until thread completes
+                            final_results.append(result)
+                            logging.info(
+                                colored(f"[{result['pr_url']}] ", "green")  + 
+                                colored(f" => Files Downloaded: {result['file_count']}", "light_cyan")
+                            )
+                        except Exception as e:
+                            logging.info(colored(f"[Exception] on {merge_url}: {e}","red"))
+
+                #Final Summary
+                logging.info(colored("\n[-] SUMMARY [-]", "yellow"))
+                for result in final_results:
+                    logging.info(
+                        colored(f"[{result['pr_url']}] ", "green") +
+                        colored(f" => Files Downloaded: {result['file_count']}", "light_cyan")
+                    )                    
+
+            else:
+                for merge_url in urls:
+                    merge_url = merge_url.strip()
+                    logging.info(colored(f"\n[-] {merge_url}","cyan"))
+                    if download_diff_only:
+                        download_only_diff_from_pr_url(merge_url)
+                    else:
+                        download_code_from_pr_url(merge_url)
+
+                
 
 main()
